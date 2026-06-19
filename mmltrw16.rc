@@ -1,0 +1,86 @@
+#include "windows.h"
+#include "resource.h"
+
+/* ------------------------------
+   メインメニュー（w20 ベース）
+   ------------------------------ */
+IDR_MAINMENU MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&Open...", IDM_FILE_OPEN
+        MENUITEM "E&xit",    IDM_FILE_EXIT
+    END
+END
+
+/* ------------------------------
+   メインダイアログ（w20 ベース）
+   ------------------------------ */
+IDD_MAIN_DIALOG DIALOG 30, 30, 120, 36
+STYLE WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+CAPTION "MML Transposer"
+MENU IDR_MAINMENU
+BEGIN
+    LTEXT "No file selected", IDC_STATIC_FILENAME,
+          2, 0, 116, 8
+
+    SCROLLBAR IDC_SLIDER_SHIFT,
+              0, 8, 120, 8,
+              WS_TABSTOP
+
+    LTEXT "Key:", IDC_STATIC_KEY,
+          2, 18, 16, 8
+
+    EDITTEXT IDC_EDIT_SHIFT,
+             19, 16, 16, 12,
+             ES_READONLY | WS_BORDER | WS_TABSTOP
+
+    SCROLLBAR IDC_SPIN_SHIFT,
+              34, 16, 8, 12,
+              SBS_VERT | WS_TABSTOP
+
+    PUSHBUTTON "Quick", IDC_BUTTON_SAVE_AUTO,
+               43, 16, 23, 12
+
+    PUSHBUTTON "Save",  IDC_BUTTON_SAVE_AS,
+               68, 16, 23, 12
+
+    CHECKBOX "Auto", IDC_CHECK_AUTOSAVE,
+             94, 18, 26, 8, WS_TABSTOP
+
+    LTEXT "Opt:", IDC_STATIC_OPTION,
+          2, 28, 16, 8
+
+    CHECKBOX "FMT",  IDC_CHECK_FORMAT,
+             19, 28, 24, 8, WS_TABSTOP
+
+    CHECKBOX "Rel",  IDC_CHECK_REL,
+             44, 28, 24, 8, WS_TABSTOP
+
+    CHECKBOX "Abs",  IDC_CHECK_ABS,
+             68, 28, 24, 8, WS_TABSTOP
+
+    CHECKBOX "D ch", IDC_CHECK_DSHIFT,
+             94, 28, 30, 8, WS_TABSTOP
+END
+
+/* ------------------------------
+   自作ファイルダイアログ（w20 のまま）
+   ------------------------------ */
+IDD_FILE_DIALOG DIALOG 10, 10, 160, 125
+STYLE WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Open File"
+BEGIN
+    LTEXT "Files:", -1, 10, 6, 60, 10
+    LISTBOX   IDC_LIST_FILES,   12, 18, 60, 70, WS_BORDER | WS_VSCROLL | WS_TABSTOP
+    LTEXT "Drives:", -1, 90, 6, 60, 10
+    LISTBOX   IDC_LIST_DRIVES,  90, 18, 60, 70, WS_BORDER | WS_VSCROLL | WS_TABSTOP
+    LTEXT "File Name:", -1, 10, 90, 60, 10
+    EDITTEXT  IDC_EDIT_PATH,    50, 90, 50, 10, WS_BORDER | WS_TABSTOP
+    LTEXT "File Type:", -1, 10, 104, 60, 10
+    EDITTEXT  IDC_EDIT_TYPE,    50, 104, 50, 30, ES_LEFT | WS_BORDER | WS_TABSTOP
+    PUSHBUTTON "", IDC_STATIC_TYPE,  52, 105, 39, 10, BS_OWNERDRAW | WS_CHILD | WS_VISIBLE
+    DEFPUSHBUTTON "OK",     IDOK,     110, 90, 40, 10
+    PUSHBUTTON    "Cancel", IDCANCEL, 110, 104,  40, 10
+END
+
