@@ -1,4 +1,10 @@
-// mmltrw16.c  Win16/C89/OpenWatcom v2  mmleng16対応 w20+w30統合版
+/* ============================================================
+ *  mmltrw16.c - International version for Win16 (also runs on Win9x)
+ *  Win16 GUI front-end (w20 + w30 unified)
+ *  Part of the MML Transposer project (mmltrwin)
+ *  Compatible with OpenWatcom C89 toolchain
+ *  English-localized comments and UI strings (no logic changes)
+ * ============================================================ */
 
 #include <windows.h>
 #include <shellapi.h>
@@ -12,6 +18,7 @@
 
 #include "resource.h"
 #include "mmleng16.h"
+#include "msgw16.h"
 
 #ifndef MAX_PATH
 #define MAX_PATH 256
@@ -25,10 +32,10 @@
 #define CBS_DROPDOWNLIST 0x0003
 #endif
 
-// メニュー選択解除通知
+// Notification for menu deselection
 #define WM_MENU_LOST (WM_USER + 100)
 
-// 自作ファイルダイアログ用
+// Parameters for custom file dialog
 typedef struct {
     int mode;
     const char* defext;
@@ -38,12 +45,15 @@ typedef struct {
 #define FILEDLG_OPEN 0
 #define FILEDLG_SAVE 1
 
-// グローバル
+// Globals
 static HINSTANCE g_hInst = NULL;
 static char input_path[MAX_PATH] = "";
 static int  g_shift    = 0;
 static int  g_mode     = MODE_PURE;
 static int  g_autosave = 1;
+
+static BOOL g_has_shell   = FALSE;
+static BOOL g_has_commdlg = FALSE;
 
 static LONG g_DlgParam = 0;
 static char file_path[MAX_PATH];
@@ -53,16 +63,30 @@ static BOOL s_useFallback = FALSE;
 
 static BOOL g_menu_hidden = FALSE;
 static BOOL g_menu_was_selected = FALSE;
-HMENU g_hMenu = NULL;
+static HMENU g_hMenu = NULL;
 
-// プロトタイプ
+static GUILang g_lang = LANG_EN;
+
+// Prototype for MMLToGUIError (Win16)
+GUIErrorCode MMLToGUIError(const MMLErrorInfo* err);
+
+// Prototypes
 BOOL CALLBACK __export DlgProc(HWND,UINT,WPARAM,LPARAM);
 void InitShiftControls(HWND);
 static void UpdateModeFromUI(HWND);
 static void DoConvertAndSave(HWND,const char*,BOOL);
+
+static GUIErrorCode DoConvertAndSave16(HWND hDlg,
+                                       const char* inpath,
+                                       BOOL use_autosave,
+                                       int shift,
+                                       int mode);
+
 static const char* ExtractFileName(const char*);
-BOOL LoadFile(const char*,char**,DWORD*);
-BOOL SaveFile(const char*,const char*,DWORD);
+
+static GUIErrorCode LoadFile16(const char* path,char** outbuf,DWORD* outsize,DWORD* out_filesize);
+static GUIErrorCode SaveFile16(const char* path, const char* data, DWORD size);
+
 void MakeAutoSaveName(const char*,int,int,char*,int);
 static int TryCommonDialogOpen(HWND,char*);
 static int TryCommonDialogSave(HWND,const char*,char*);
@@ -74,8 +98,10 @@ static void AddDrives(HWND);
 static void RebuildPlaceList(HWND);
 static void RebuildFileList(HWND);
 static void GoParentDir(void);
+static void HandleDropFiles16(HWND hDlg, HDROP hDrop);
+static void ApplyLanguage16(HWND hDlg);
 
-// w20互換パラメータ渡し
+// w20-compatible parameter passing
 int MyDialogBoxParam(HINSTANCE hInst,LPCSTR tpl,HWND hWnd,FARPROC proc,LONG param)
 {
     g_DlgParam = param;
@@ -86,7 +112,23 @@ int MyDialogBoxParam(HINSTANCE hInst,LPCSTR tpl,HWND hWnd,FARPROC proc,LONG para
 int PASCAL WinMain(HINSTANCE hInst,HINSTANCE hPrev,LPSTR lpCmd,int nShow)
 {
     MSG msg;
+    HINSTANCE hShell;
+    HINSTANCE hCommdlg;
     g_hInst = hInst;
+
+    /* DLL Check (SHELL / COMMDLG) */
+    hShell = LoadLibrary("SHELL.DLL");
+    if (hShell) {
+        g_has_shell = TRUE;
+        FreeLibrary(hShell);
+    }
+
+    hCommdlg = LoadLibrary("COMMDLG.DLL");
+    if (hCommdlg) {
+        g_has_commdlg = TRUE;
+        FreeLibrary(hCommdlg);
+    }
+
     PeekMessage(&msg,NULL,0,0,PM_NOREMOVE);
     DialogBox(hInst,MAKEINTRESOURCE(IDD_MAIN_DIALOG),NULL,(DLGPROC)DlgProc);
     PostQuitMessage(0);
@@ -97,7 +139,7 @@ int PASCAL WinMain(HINSTANCE hInst,HINSTANCE hPrev,LPSTR lpCmd,int nShow)
     return 0;
 }
 
-// パス末尾名抽出
+// Extract filename from path
 static const char* ExtractFileName(const char* path)
 {
     const char* p=strrchr(path,'\\');
@@ -107,7 +149,7 @@ static const char* ExtractFileName(const char* path)
     return path;
 }
 
-// Shift UI 初期化
+// Initialize Shift UI controls
 void InitShiftControls(HWND hDlg)
 {
     SetScrollRange(GetDlgItem(hDlg,IDC_SPIN_SHIFT),SB_CTL,-12,12,FALSE);
@@ -119,7 +161,7 @@ void InitShiftControls(HWND hDlg)
     SetDlgItemInt(hDlg,IDC_EDIT_SHIFT,g_shift,TRUE);
 }
 
-// モード更新
+// Update mode flags from UI
 static void UpdateModeFromUI(HWND hDlg)
 {
     int fmt = IsDlgButtonChecked(hDlg,IDC_CHECK_FORMAT)==1;
@@ -134,7 +176,53 @@ static void UpdateModeFromUI(HWND hDlg)
     if(dch) g_mode |= MODE_NOISE_SHIFT;
 }
 
-// メニュー有無で高さ調整
+/* ------------------------------------------------------------
+ * ShowError16 - GUI error message generator (Win32-compatible)
+ * ------------------------------------------------------------ */
+static void ShowError16(HWND hDlg,
+                        GUIErrorCode code,
+                        const MMLErrorInfo* err_info,
+                        DWORD aux)
+{
+    char msg[512];
+    const char* tmpl;
+
+    if (code <= GUI_ERR_OK || code >= GUI_ERR_MAX)
+        return;
+
+    tmpl = g_lang_table16[g_lang].gui_msg[code];
+    if (!tmpl)
+        return;
+
+    switch (code)
+    {
+    case GUI_ERR_LF_TOO_LARGE:
+        wsprintf(msg, tmpl, (unsigned long)aux, MAX_TEXT);
+        break;
+
+    case GUI_ERR_MML_OCTAVE:
+        wsprintf(msg, tmpl,
+                 err_info ? err_info->channel_char : '?',
+                 err_info ? err_info->line_number  : 0,
+                 err_info ? err_info->calculated_value : 0);
+        break;
+
+    case GUI_ERR_MML_UNKNOWN:
+        wsprintf(msg, tmpl, aux);
+        break;
+
+    default:
+        lstrcpy(msg, tmpl);
+        break;
+    }
+
+    MessageBox(hDlg,
+               msg,
+               "Error",
+               MB_OK | MB_ICONSTOP);
+}
+
+// Adjust dialog height depending on menu visibility
 void AdjustDialogHeight(HWND hDlg,BOOL visible)
 {
     RECT rc;
@@ -149,7 +237,83 @@ void AdjustDialogHeight(HWND hDlg,BOOL visible)
                  SWP_NOZORDER|SWP_NOMOVE);
 }
 
-// DlgProc
+// Handle dropped files (*.mml only) - Win16 version
+static void HandleDropFiles16(HWND hDlg, HDROP hDrop)
+{
+    char path[MAX_PATH] = "";
+    char* inbuf = NULL;
+    DWORD insize = 0;
+    DWORD fsize  = 0;
+    GUIErrorCode gerr;
+
+    if (!DragQueryFile(hDrop, 0, path, sizeof(path))) {
+        DragFinish(hDrop);
+        return;
+    }
+
+    /* Extension check (*.mml only) */
+    {
+        char* ext = strrchr(path, '.');
+        if (!ext || lstrcmpi(ext, ".mml") != 0) {
+
+            input_path[0] = '\0';
+            SetDlgItemText(hDlg, IDC_STATIC_FILENAME,
+                           (LPSTR)g_lang_table16[g_lang].tip[TIP_INVALID_TYPE]);
+
+            DragFinish(hDrop);
+            return;
+        }
+    }
+
+    /* Try loading file first (Win32-compatible behavior) */
+    gerr = LoadFile16(path, &inbuf, &insize, &fsize);
+    if (gerr != GUI_ERR_OK) {
+
+        input_path[0] = '\0';
+        SetDlgItemText(hDlg, IDC_STATIC_FILENAME,
+            g_lang_table16[g_lang].tip[TIP_FILENAME_LABEL]);
+        ShowError16(hDlg, gerr, NULL, fsize);
+        DragFinish(hDrop);
+        return;
+    }
+
+    /* Load succeeded: update path and UI */
+    lstrcpy(input_path, path);
+    SetDlgItemText(hDlg, IDC_STATIC_FILENAME, ExtractFileName(path));
+
+    if (IsDlgButtonChecked(hDlg, IDC_CHECK_AUTOSAVE) == 1) {
+        UpdateModeFromUI(hDlg);
+        DoConvertAndSave16(hDlg, input_path, TRUE, g_shift, g_mode);
+    }
+
+    free(inbuf);
+    DragFinish(hDrop);
+}
+
+// Apply language (labels only, Win16)
+static void ApplyLanguage16(HWND hDlg)
+{
+    SetDlgItemText(hDlg, IDC_STATIC_KEY,
+                   g_lang_table16[g_lang].ui_label_key);
+    SetDlgItemText(hDlg, IDC_STATIC_OPTION,
+                   g_lang_table16[g_lang].ui_label_option);
+    SetDlgItemText(hDlg, IDC_BUTTON_SAVE_AUTO,
+                   g_lang_table16[g_lang].ui_label_quick);
+    SetDlgItemText(hDlg, IDC_BUTTON_SAVE_AS,
+                   g_lang_table16[g_lang].ui_label_save);
+    SetDlgItemText(hDlg, IDC_CHECK_AUTOSAVE,
+                   g_lang_table16[g_lang].ui_label_auto);
+
+    if (input_path[0] == '\0') {
+        SetDlgItemText(hDlg, IDC_STATIC_FILENAME,
+                       g_lang_table16[g_lang].tip[TIP_FILENAME_LABEL]);
+    } else {
+        SetDlgItemText(hDlg, IDC_STATIC_FILENAME,
+                       ExtractFileName(input_path));
+    }
+}
+
+// Dialog procedure
 BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
 {
     char buf[16];
@@ -159,8 +323,6 @@ BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
     case WM_INITDIALOG:
     {
         RECT r;
-        HINSTANCE hShell;
-        HMENU m;
         int w;
         int h;
         int x;
@@ -180,26 +342,20 @@ BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
         EnableWindow(GetDlgItem(hDlg,IDC_BUTTON_SAVE_AUTO),FALSE);
         EnableWindow(GetDlgItem(hDlg,IDC_BUTTON_SAVE_AS),FALSE);
 
-        SetDlgItemText(hDlg,IDC_STATIC_FILENAME,"No file selected");
+        ApplyLanguage16(hDlg);
 
-        // SHELL.DLL があれば D&D → メニュー隠す
-        hShell=LoadLibrary("SHELL.DLL");
-        if(hShell){
-            FARPROC p=GetProcAddress(hShell,"DragQueryFile");
-            if(p){
-                g_menu_hidden=TRUE;
-                m=GetMenu(hDlg);
-                if(m){
-                    g_hMenu=m;
-                    SetMenu(hDlg,NULL);
-                    DrawMenuBar(hDlg);
-                    AdjustDialogHeight(hDlg,FALSE);
-                }
-            }else g_menu_hidden=FALSE;
-            FreeLibrary(hShell);
+        // Hide the menu by default; show it temporarily when Alt is pressed
+        g_hMenu = GetMenu(hDlg);
+        if (g_hMenu != NULL) {
+            SetMenu(hDlg, NULL);
+            DrawMenuBar(hDlg);
+            g_menu_hidden = TRUE;
+            AdjustDialogHeight(hDlg, FALSE);
+        } else {
+            g_menu_hidden = FALSE;
         }
 
-        // 中央配置
+        // Center dialog
         GetWindowRect(hDlg,&r);
         w=r.right-r.left;
         h=r.bottom-r.top;
@@ -210,37 +366,12 @@ BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
     }
 
     case WM_SHOWWINDOW:
-        if(wParam) DragAcceptFiles(hDlg,TRUE);
+        if (wParam) DragAcceptFiles(hDlg, g_has_shell);
         break;
 
     case WM_DROPFILES:
-    {
-        HDROP h=(HDROP)wParam;
-        char path[MAX_PATH]; path[0]='\0';
-        if(DragQueryFile(h,0,path,sizeof(path))){
-            char* ext=strrchr(path,'.');
-            if(!ext||lstrcmpi(ext,".mml")!=0){
-                input_path[0]='\0';
-                SetDlgItemText(hDlg,IDC_STATIC_FILENAME,"ERROR: Cannot OPEN.");
-                DragFinish(h);
-                return TRUE;
-            }
-            lstrcpy(input_path,path);
-            SetDlgItemText(hDlg,IDC_STATIC_FILENAME,ExtractFileName(input_path));
-
-            if(IsDlgButtonChecked(hDlg,IDC_CHECK_AUTOSAVE)==1){
-                UpdateModeFromUI(hDlg);
-                DoConvertAndSave(hDlg,input_path,TRUE);
-                EnableWindow(GetDlgItem(hDlg,IDC_BUTTON_SAVE_AUTO),FALSE);
-                EnableWindow(GetDlgItem(hDlg,IDC_BUTTON_SAVE_AS),FALSE);
-            }else{
-                EnableWindow(GetDlgItem(hDlg,IDC_BUTTON_SAVE_AUTO),TRUE);
-                EnableWindow(GetDlgItem(hDlg,IDC_BUTTON_SAVE_AS),TRUE);
-            }
-        }
-        DragFinish(h);
+        HandleDropFiles16(hDlg, (HDROP)wParam);
         return TRUE;
-    }
 
     case WM_HSCROLL:
     {
@@ -286,7 +417,7 @@ BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
         break;
     }
 
-    // Alt → メニュー一時表示
+    // Alt key temporarily shows the menu
     case WM_SYSCOMMAND:
         if((wParam&0xFFF0)==SC_KEYMENU){
             if(g_menu_hidden && GetMenu(hDlg)==NULL){
@@ -302,7 +433,7 @@ BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
         if(wParam==VK_MENU) return 0;
         break;
 
-    // メニュー選択状態監視
+    // Track menu selection state
     case WM_MENUSELECT:
     {
         BOOL now=(wParam!=0);
@@ -312,7 +443,7 @@ BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
     }
     break;
 
-    // メニュー閉じ処理
+    // When menu is closed, hide it again if needed
     case WM_MENU_LOST:
         if(g_menu_hidden && GetMenu(hDlg)!=NULL){
             SetMenu(hDlg,NULL);
@@ -320,12 +451,13 @@ BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
             AdjustDialogHeight(hDlg,FALSE);
         }
         break;
+
     case WM_COMMAND:
     {
         WORD id=LOWORD(wParam);
         int cur_check;
 
-        // w20方式チェックボックス処理
+        // w20-style checkbox handling
         if(id==IDC_CHECK_AUTOSAVE ||
            id==IDC_CHECK_FORMAT   ||
            id==IDC_CHECK_REL      ||
@@ -353,36 +485,65 @@ BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
 
         switch(id)
         {
-        // メニュー: Open
+        // Menu: Open
         case IDM_FILE_OPEN:
         {
-            char path[MAX_PATH]; int r;
-            path[0]='\0';
+            char path[MAX_PATH];
+            int r;
+            path[0] = '\0';
 
-            // まず共通DLGを試し、ダメなら自作DLGへフォールバック
-            r=TryCommonDialogOpen(hDlg,path);
-            if(r==1){
-                // OK
-            }else if(r==-1){
+            /* Try common dialog first, then fallback to custom dialog */
+            r = TryCommonDialogOpen(hDlg, path);
+            if (r == 1) {
+                /* OK */
+            } else if (r == -1) {
                 break;
-            }else{
-                if(!SelectOpenPath(hDlg,path)) break;
+            } else {
+                if (!SelectOpenPath(hDlg, path)) break;
             }
 
-            if(path[0]=='\0') break;
+            if (path[0] == '\0') break;
 
-            lstrcpy(input_path,path);
-            SetDlgItemText(hDlg,IDC_STATIC_FILENAME,ExtractFileName(input_path));
+            /* LoadFile check (Win32-compatible behavior) */
+            {
+                char* tmp = NULL;
+                DWORD insize = 0;
+                DWORD fsize  = 0;
+                GUIErrorCode gerr;
 
-            if(IsDlgButtonChecked(hDlg,IDC_CHECK_AUTOSAVE)==1){
+                gerr = LoadFile16(path, &tmp, &insize, &fsize);
+                if (gerr != GUI_ERR_OK) {
+
+                    input_path[0] = '\0';
+                    SetDlgItemText(hDlg, IDC_STATIC_FILENAME,
+                        g_lang_table16[g_lang].tip[TIP_FILENAME_LABEL]);
+
+                    ShowError16(hDlg, gerr, NULL, fsize);
+
+                    if (tmp) free(tmp);
+                    break;
+                }
+
+                if (tmp) free(tmp);
+            }
+
+            lstrcpy(input_path, path);
+            SetDlgItemText(hDlg, IDC_STATIC_FILENAME, ExtractFileName(input_path));
+
+            if (IsDlgButtonChecked(hDlg, IDC_CHECK_AUTOSAVE) == 1) {
+
                 UpdateModeFromUI(hDlg);
-                DoConvertAndSave(hDlg,input_path,TRUE);
-                EnableWindow(GetDlgItem(hDlg,IDC_BUTTON_SAVE_AUTO),FALSE);
-                EnableWindow(GetDlgItem(hDlg,IDC_BUTTON_SAVE_AS),FALSE);
-            }else{
-                EnableWindow(GetDlgItem(hDlg,IDC_BUTTON_SAVE_AUTO),TRUE);
-                EnableWindow(GetDlgItem(hDlg,IDC_BUTTON_SAVE_AS),TRUE);
+                DoConvertAndSave16(hDlg, input_path, TRUE, g_shift, g_mode);
+
+                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_SAVE_AUTO), FALSE);
+                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_SAVE_AS), FALSE);
+
+            } else {
+
+                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_SAVE_AUTO), TRUE);
+                EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_SAVE_AS), TRUE);
             }
+
             break;
         }
 
@@ -391,25 +552,35 @@ BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
             EndDialog(hDlg,0);
             return TRUE;
 
-        // ボタン
+        case IDM_LANG_EN:
+            g_lang = LANG_EN;
+            ApplyLanguage16(hDlg);
+            break;
+
+        case IDM_LANG_JP:
+            g_lang = LANG_JP;
+            ApplyLanguage16(hDlg);
+            break;
+
+        // Buttons
         case IDC_BUTTON_SAVE_AUTO:
             if(IsDlgButtonChecked(hDlg,IDC_CHECK_AUTOSAVE)==1) break;
             if(input_path[0]=='\0'){
-                MessageBox(hDlg,"No input file.","Error",MB_OK|MB_ICONSTOP);
+                ShowError16(hDlg, GUI_ERR_LF_OPEN, NULL, 0);
                 break;
             }
             UpdateModeFromUI(hDlg);
-            DoConvertAndSave(hDlg,input_path,TRUE);
+            DoConvertAndSave16(hDlg, input_path, TRUE, g_shift, g_mode);
             break;
 
         case IDC_BUTTON_SAVE_AS:
             if(IsDlgButtonChecked(hDlg,IDC_CHECK_AUTOSAVE)==1) break;
             if(input_path[0]=='\0'){
-                MessageBox(hDlg,"No input file.","Error",MB_OK|MB_ICONSTOP);
+                ShowError16(hDlg, GUI_ERR_LF_OPEN, NULL, 0);
                 break;
             }
             UpdateModeFromUI(hDlg);
-            DoConvertAndSave(hDlg,input_path,FALSE);
+            DoConvertAndSave16(hDlg, input_path, FALSE, g_shift, g_mode);
             break;
 
         case IDCANCEL:
@@ -429,147 +600,130 @@ BOOL CALLBACK __export DlgProc(HWND hDlg,UINT msg,WPARAM wParam,LPARAM lParam)
     return FALSE;
 }
 
-// 変換＋保存
-static void DoConvertAndSave(HWND hDlg,const char* inpath,BOOL use_autosave)
+// ------------------------------------------------------------
+// DoConvertAndSave16 - Win16 version using GUIErrorCode
+// ------------------------------------------------------------
+static GUIErrorCode DoConvertAndSave16(HWND hDlg,
+                                       const char* inpath,
+                                       BOOL use_autosave,
+                                       int shift,
+                                       int mode)
 {
-    char* inbuf=NULL;
-    DWORD insize=0;
-    int outsize;
-    char* outbuf;
+    char* inbuf = NULL;
+    DWORD insize = 0;
+    DWORD fsize = 0;
+    long outsize;
+    char* outbuf = NULL;
     int outlen;
     char outpath[MAX_PATH];
     MMLErrorInfo err;
+    GUIErrorCode gerr;
 
-    if(!LoadFile(inpath,&inbuf,&insize)){
-        MessageBox(hDlg,"入力ファイルを読み込めません。","エラー",MB_OK|MB_ICONSTOP);
-        return;
+    /* Load input file (MAX_TEXT check is inside LoadFile16) */
+    gerr = LoadFile16(inpath, &inbuf, &insize, &fsize);
+    if (gerr != GUI_ERR_OK) {
+        ShowError16(hDlg, gerr, NULL, fsize);
+        return gerr;
     }
 
-    outsize=(int)insize*2+1024;
-    outbuf=(char*)malloc(outsize);
-    if(!outbuf){
+    /* Fixed output buffer (MAX_OUT) */
+    outsize = MAX_OUT;
+    outbuf = (char*)malloc(MAX_OUT);
+    if (!outbuf) {
         free(inbuf);
-        MessageBox(hDlg,"メモリ確保に失敗しました。","エラー",MB_OK|MB_ICONSTOP);
-        return;
+        ShowError16(hDlg, GUI_ERR_MML_OUTBUF, NULL, 0);
+        return GUI_ERR_MML_OUTBUF;
     }
 
-    memset(&err,0,sizeof(err));
-    outlen=mml_process(inbuf,g_shift,g_mode,outbuf,outsize,&err);
+    /* Process MML */
+    memset(&err, 0, sizeof(err));
+    outlen = mml_process(inbuf, shift, mode, outbuf, (int)outsize, &err);
     free(inbuf);
 
-    if(outlen<0){
-        char msg[256];
-        switch(err.error_code){
-        case MML_ERR_NULL_INPUT:
-            lstrcpy(msg,"内部エラー: NULL 入力です。"); break;
-        case MML_ERR_EMPTY_INPUT:
-            lstrcpy(msg,"入力が空です。"); break;
-        case MML_ERR_OUTBUF:
-            lstrcpy(msg,"出力バッファサイズが不正です。"); break;
-        case MML_ERR_BAD_SHIFT:
-            lstrcpy(msg,"移調幅が範囲外です (-12～12)。"); break;
-        case MML_ERR_BAD_MODE:
-            lstrcpy(msg,"モード指定が不正です。"); break;
-        case MML_ERR_OCTAVE_OUT_OF_RANGE:
-            wsprintf(msg,
-                     "オクターブ範囲外エラーが発生しました。\n"
-                     "チャンネル: %c\n行: %d\n計算値: o%d",
-                     err.channel_char?err.channel_char:'?',
-                     err.line_number,
-                     err.calculated_value);
-            break;
-        default:
-            lstrcpy(msg,"変換に失敗しました。"); break;
-        }
-        MessageBox(hDlg,msg,"エラー",MB_OK|MB_ICONSTOP);
+    if (outlen < 0) {
+        gerr = MMLToGUIError(&err);
+        ShowError16(hDlg, gerr, &err, (DWORD)err.error_code);
         free(outbuf);
-        return;
+        return gerr;
     }
 
-    if(use_autosave){
-        MakeAutoSaveName(inpath,g_shift,g_mode,outpath,sizeof(outpath));
-    }else{
-        int r;
-        // Save As も共通DLG優先、不可なら自作DLGへ
-        r=TryCommonDialogSave(hDlg,inpath,outpath);
-        if(r==1){
-        }else if(r==-1){
+    if (outlen >= outsize) {
+        ShowError16(hDlg, GUI_ERR_MML_OUTBUF, NULL, 0);
+        free(outbuf);
+        return GUI_ERR_MML_OUTBUF;
+    }
+
+    outbuf[outlen] = '\0';
+
+    /* Determine output path */
+    if (use_autosave) {
+        MakeAutoSaveName(inpath, shift, mode, outpath, sizeof(outpath));
+    } else {
+        int r = TryCommonDialogSave(hDlg, inpath, outpath);
+        if (r == 1) {
+            /* OK */
+        } else if (r == -1) {
             free(outbuf);
-            return;
-        }else{
-            if(!SelectSavePath(hDlg,inpath,outpath)){
+            return GUI_ERR_OK; /* Cancel */
+        } else {
+            if (!SelectSavePath(hDlg, inpath, outpath)) {
                 free(outbuf);
-                return;
+                return GUI_ERR_OK; /* Cancel */
             }
         }
     }
 
-    if(!SaveFile(outpath,outbuf,(DWORD)outlen)){
-        MessageBox(hDlg,"保存に失敗しました。","エラー",MB_OK|MB_ICONSTOP);
+    /* Save output file */
+    gerr = SaveFile16(outpath, outbuf, (DWORD)outlen);
+    if (gerr != GUI_ERR_OK) {
+        ShowError16(hDlg, gerr, NULL, 0);
+        free(outbuf);
+        return gerr;
     }
+
     free(outbuf);
+    return GUI_ERR_OK;
 }
 
-// 共通DLG Open (1=成功,0=フォールバック,-1=Cancel)
-static int TryCommonDialogOpen(HWND hwndOwner,char* outpath)
+// Common dialog Open (1=success,0=fallback,-1=Cancel)
+static int TryCommonDialogOpen(HWND hwndOwner, char* outpath)
 {
-    HINSTANCE hComdlg;
-    BOOL (WINAPI *pGetOpenFileName)(LPOPENFILENAME);
     OPENFILENAME ofn;
     char file_title[MAX_PATH];
 
-    outpath[0]='\0';
-    hComdlg=LoadLibrary("COMMDLG.DLL");
-    if(!hComdlg) return 0;
+    outpath[0] = '\0';
 
-    pGetOpenFileName=(BOOL (WINAPI *)(LPOPENFILENAME))
-        GetProcAddress(hComdlg,"GetOpenFileName");
-    if(!pGetOpenFileName){
-        FreeLibrary(hComdlg);
-        return 0;
+    if (!g_has_commdlg) return 0;
+
+    memset(&ofn, 0, sizeof(ofn));
+    ofn.lStructSize     = OPENFILENAME_SIZE_VERSION_300;
+    ofn.hwndOwner       = hwndOwner;
+    ofn.lpstrFilter     = "MML Files (*.mml)\0*.mml\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile       = outpath;
+    ofn.nMaxFile        = MAX_PATH;
+    ofn.lpstrFileTitle  = file_title;
+    ofn.nMaxFileTitle   = sizeof(file_title);
+    ofn.Flags           = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt     = "mml";
+
+    if (!GetOpenFileName(&ofn)) {
+        DWORD err = CommDlgExtendedError();
+        if (err == 0) return -1;
+        else          return 0;
     }
 
-    memset(&ofn,0,sizeof(ofn));
-    ofn.lStructSize    =OPENFILENAME_SIZE_VERSION_300;
-    ofn.hwndOwner      =hwndOwner;
-    ofn.lpstrFilter    ="MML Files (*.mml)\0*.mml\0All Files (*.*)\0*.*\0";
-    ofn.lpstrFile      =outpath;
-    ofn.nMaxFile       =MAX_PATH;
-    ofn.lpstrFileTitle =file_title;
-    ofn.nMaxFileTitle  =sizeof(file_title);
-    ofn.Flags          =OFN_FILEMUSTEXIST|OFN_HIDEREADONLY;
-    ofn.lpstrDefExt    ="mml";
-
-    outpath[0]='\0';
-    if(!pGetOpenFileName(&ofn)){
-        DWORD err=CommDlgExtendedError();
-        FreeLibrary(hComdlg);
-        if(err==0) return -1;
-        else       return 0;
-    }
-
-    FreeLibrary(hComdlg);
     return 1;
 }
 
-// 共通DLG Save (1=成功,0=不可,-1=Cancel)
+// Common dialog Save (1=success,0=fallback,-1=Cancel)
 static int TryCommonDialogSave(HWND hwndOwner,const char* inpath,char* outpath)
 {
-    HINSTANCE hComdlg;
-    BOOL (WINAPI *pGetSaveFileName)(LPOPENFILENAME);
     OPENFILENAME ofn;
     char file_title[MAX_PATH];
 
     outpath[0]='\0';
-    hComdlg=LoadLibrary("COMMDLG.DLL");
-    if(!hComdlg) return 0;
 
-    pGetSaveFileName=(BOOL (WINAPI *)(LPOPENFILENAME))
-        GetProcAddress(hComdlg,"GetSaveFileName");
-    if(!pGetSaveFileName){
-        FreeLibrary(hComdlg);
-        return 0;
-    }
+    if (!g_has_commdlg) return 0;
 
     memset(&ofn,0,sizeof(ofn));
     ofn.lStructSize    =OPENFILENAME_SIZE_VERSION_300;
@@ -583,16 +737,19 @@ static int TryCommonDialogSave(HWND hwndOwner,const char* inpath,char* outpath)
     ofn.lpstrDefExt    ="mml";
 
     lstrcpy(outpath,ExtractFileName(inpath));
-    if(!pGetSaveFileName(&ofn)){
-        FreeLibrary(hComdlg);
-        return -1;
+
+    if(!GetSaveFileName(&ofn)){
+        DWORD err = CommDlgExtendedError();
+        if (err == 0) return -1;
+        else          return 0;
     }
 
-    FreeLibrary(hComdlg);
     return 1;
 }
 
-// 自作DLG Open
+// ------------------------------
+// Custom File Dialog: Open
+// ------------------------------
 BOOL SelectOpenPath(HWND hwndOwner,char* outpath)
 {
     FARPROC lp;
@@ -628,7 +785,9 @@ BOOL SelectOpenPath(HWND hwndOwner,char* outpath)
     return FALSE;
 }
 
-// 自作DLG Save
+// ------------------------------
+// Custom File Dialog: Save
+// ------------------------------
 BOOL SelectSavePath(HWND hwndOwner,const char* inpath,char* outpath)
 {
     FARPROC lp;
@@ -651,7 +810,9 @@ BOOL SelectSavePath(HWND hwndOwner,const char* inpath,char* outpath)
     return FALSE;
 }
 
-// DOSドライブ有効判定
+// ------------------------------
+// DOS drive validity check
+// ------------------------------
 static int IsDriveValid(int drive_num)
 {
     union REGS r;
@@ -666,7 +827,9 @@ static int IsDriveValid(int drive_num)
     return 0;
 }
 
-// ドライブ一覧追加
+// ------------------------------
+// Add drive list entries
+// ------------------------------
 static void AddDrives(HWND hList)
 {
     int d;
@@ -682,7 +845,9 @@ static void AddDrives(HWND hList)
     }
 }
 
-// カレントディレクトリとサブディレクトリ＋ドライブ一覧
+// ------------------------------
+// Rebuild directory and drive list
+// ------------------------------
 static void RebuildPlaceList(HWND hDlg)
 {
     HWND hList=GetDlgItem(hDlg,IDC_LIST_DRIVES);
@@ -694,10 +859,12 @@ static void RebuildPlaceList(HWND hDlg)
 
     if(_getcwd(cwd,sizeof(cwd))==NULL) cwd[0]='\0';
 
+    // Add parent directory entry unless root
     if(cwd[0] && !(cwd[0] && cwd[1]==':' && cwd[2]=='\\' && cwd[3]=='\0')){
         SendMessage(hList,LB_ADDSTRING,0,(LPARAM)"[..]");
     }
 
+    // Add subdirectories
     done=_dos_findfirst("*.*",_A_SUBDIR,&ff);
     while(!done){
         if(ff.attrib&_A_SUBDIR){
@@ -708,10 +875,13 @@ static void RebuildPlaceList(HWND hDlg)
         done=_dos_findnext(&ff);
     }
 
+    // Add drives
     AddDrives(hList);
 }
 
-// 親ディレクトリへ
+// ------------------------------
+// Go to parent directory
+// ------------------------------
 static void GoParentDir(void)
 {
     char cwd[MAX_PATH];
@@ -735,7 +905,9 @@ static void GoParentDir(void)
     _chdir(cwd);
 }
 
-// ファイル一覧再構築（フィルタはコンボ or リストから取得）
+// ------------------------------
+// Rebuild file list (filter from combo/list)
+// ------------------------------
 static void RebuildFileList(HWND hDlg)
 {
     char szFilter[64];
@@ -759,7 +931,9 @@ static void RebuildFileList(HWND hDlg)
     DlgDirList(hDlg,szSpec,IDC_LIST_FILES,0,0x0000);
 }
 
-// 自作ファイルダイアログ
+// ------------------------------
+// Custom File Dialog Procedure
+// ------------------------------
 BOOL FAR PASCAL FileDialogProc(HWND hDlg,WORD msg,WORD wParam,LONG lParam)
 {
     static int s_isSaveDlg;
@@ -771,110 +945,47 @@ BOOL FAR PASCAL FileDialogProc(HWND hDlg,WORD msg,WORD wParam,LONG lParam)
     case WM_INITDIALOG:
     {
         FILEDLG_PARAM* p;
-        static FILEDLG_PARAM defp={FILEDLG_OPEN,".mml",NULL};
-        HWND hEdit,hStatic,hList=NULL;
-        RECT rcEdit;
-        POINT p1,p2;
+        static FILEDLG_PARAM defp = { FILEDLG_OPEN,".mml",NULL };
 
-        s_hComboType=NULL;
-        s_useFallback=FALSE;
+        s_hComboType  = NULL;
+        s_useFallback = FALSE;
 
-        p=(g_DlgParam?(FILEDLG_PARAM*)g_DlgParam:&defp);
-        s_isSaveDlg=(p->mode==FILEDLG_SAVE);
+        p = (g_DlgParam ? (FILEDLG_PARAM*)g_DlgParam : &defp);
+        s_isSaveDlg = (p->mode == FILEDLG_SAVE);
 
-        if(p->initdir && p->initdir[0]) _chdir(p->initdir);
+        if (p->initdir && p->initdir[0]) _chdir(p->initdir);
 
-        SetWindowText(hDlg,s_isSaveDlg?"Save As":"Open File");
+        SetWindowText(hDlg,s_isSaveDlg ? "Save As" : "Open File");
+
         SetDlgItemText(hDlg,IDC_STATIC_TYPE,"*.mml");
 
-        hEdit  =GetDlgItem(hDlg,IDC_EDIT_TYPE);
-        hStatic=GetDlgItem(hDlg,IDC_STATIC_TYPE);
+        {
+            HWND hList;
+            HWND hOld = GetDlgItem(hDlg,IDC_EDIT_TYPE);
+            RECT rc;
+            GetWindowRect(hOld,&rc);
+            ScreenToClient(hDlg,(LPPOINT)&rc.left);
+            ScreenToClient(hDlg,(LPPOINT)&rc.right);
 
-        if(hEdit){
-            GetWindowRect(hEdit,&rcEdit);
-            p1.x=rcEdit.left;  p1.y=rcEdit.top;
-            p2.x=rcEdit.right; p2.y=rcEdit.bottom;
-            ScreenToClient(hDlg,&p1);
-            ScreenToClient(hDlg,&p2);
-            rcEdit.left  =p1.x;
-            rcEdit.top   =p1.y;
-            rcEdit.right =p2.x;
-            rcEdit.bottom=p2.y;
+            DestroyWindow(hOld);
 
-            // COMBOBOX が作れない環境ではリストボックスにフォールバック
-            {
-                HWND hTest=CreateWindow("COMBOBOX",NULL,WS_CHILD,
-                                        0,0,0,0,hDlg,NULL,g_hInst,NULL);
-                if(hTest){
-                    DestroyWindow(hTest);
-                    s_useFallback=FALSE;
-                }else{
-                    s_useFallback=TRUE;
-                }
-            }
+            hList = CreateWindow(
+                "LISTBOX",NULL,
+                WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_BORDER,
+                rc.left,rc.top + 2,
+                rc.right - rc.left,20,
+                hDlg,(HMENU)IDC_EDIT_TYPE,g_hInst,NULL
+            );
 
-            if(!s_useFallback){
-                int x=rcEdit.left;
-                int y=rcEdit.top;
-                int cx=100;
-                int cy=62;
-
-                s_hComboType=CreateWindow(
-                    "COMBOBOX",NULL,
-                    WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,
-                    x,y,cx,cy,
-                    hDlg,(HMENU)IDC_EDIT_TYPE,g_hInst,NULL
-                );
-                if(s_hComboType){
-                    SendMessage(s_hComboType,CB_ADDSTRING,0,(LPARAM)"*.mml");
-                    SendMessage(s_hComboType,CB_ADDSTRING,0,(LPARAM)"*.*");
-                    SendMessage(s_hComboType,CB_SETCURSEL,0,0L);
-                }
-                ShowWindow(hEdit,SW_HIDE);
-            }else{
-                ShowWindow(hStatic,SW_HIDE);
-                EnableWindow(hStatic,FALSE);
-                DestroyWindow(hEdit);
-
-                hList=CreateWindow(
-                    "LISTBOX",NULL,
-                    WS_CHILD|WS_VISIBLE|LBS_NOTIFY|WS_BORDER,
-                    rcEdit.left,rcEdit.top,
-                    rcEdit.right-rcEdit.left,
-                    40,
-                    hDlg,(HMENU)IDC_EDIT_TYPE,g_hInst,NULL
-                );
-                SendMessage(hList,LB_ADDSTRING,0,(LPARAM)"*.mml");
-                SendMessage(hList,LB_ADDSTRING,0,(LPARAM)"*.*");
-                SendMessage(hList,LB_SETCURSEL,0,0);
-            }
-        }else{
-            s_useFallback=TRUE;
+            SendMessage(hList,LB_ADDSTRING,0,(LPARAM)"*.mml");
+            SendMessage(hList,LB_SETCURSEL,0,0);
         }
 
         RebuildFileList(hDlg);
         RebuildPlaceList(hDlg);
         SetDlgItemText(hDlg,IDC_EDIT_PATH,"");
-        g_DlgParam=0;
+        g_DlgParam = 0;
         return TRUE;
-    }
-
-    case WM_DRAWITEM:
-    {
-        LPDRAWITEMSTRUCT dis=(LPDRAWITEMSTRUCT)lParam;
-        if(s_useFallback) return FALSE;
-        if(dis->CtlID==IDC_STATIC_TYPE){
-            HBRUSH hbr;
-            char text[64];
-            hbr=(HBRUSH)GetClassWord(hDlg,GCW_HBRBACKGROUND);
-            FillRect(dis->hDC,&dis->rcItem,hbr);
-            SetBkMode(dis->hDC,TRANSPARENT);
-            GetWindowText(dis->hwndItem,text,sizeof(text));
-            TextOut(dis->hDC,dis->rcItem.left,dis->rcItem.top,
-                    text,lstrlen(text));
-            return TRUE;
-        }
-        break;
     }
 
     case WM_COMMAND:
@@ -889,7 +1000,7 @@ BOOL FAR PASCAL FileDialogProc(HWND hDlg,WORD msg,WORD wParam,LONG lParam)
         int idx=0,cbsel=0,sel=0,nIndex=0;
         HWND hList=NULL;
 
-        // フィルタ変更（コンボ）
+        // Filter change (combo)
         if(!s_useFallback &&
            s_hComboType && IsWindow(s_hComboType) &&
            id==IDC_EDIT_TYPE && code==CBN_SELCHANGE)
@@ -903,7 +1014,7 @@ BOOL FAR PASCAL FileDialogProc(HWND hDlg,WORD msg,WORD wParam,LONG lParam)
             return TRUE;
         }
 
-        // フィルタ変更（フォールバックリスト）
+        // Filter change (fallback list)
         if(s_useFallback &&
            id==IDC_EDIT_TYPE &&
            code==LBN_SELCHANGE)
@@ -916,7 +1027,7 @@ BOOL FAR PASCAL FileDialogProc(HWND hDlg,WORD msg,WORD wParam,LONG lParam)
             return TRUE;
         }
 
-        // STATIC_TYPE クリックでコンボを開く
+        // STATIC_TYPE click opens the combo box
         if(!s_useFallback && id==IDC_STATIC_TYPE && code==BN_CLICKED){
             if(s_hComboType){
                 SetFocus(s_hComboType);
@@ -925,7 +1036,7 @@ BOOL FAR PASCAL FileDialogProc(HWND hDlg,WORD msg,WORD wParam,LONG lParam)
             return TRUE;
         }
 
-        // ファイル選択変更
+        // File selection change
         if(wParam==IDC_LIST_FILES && HIWORD(lParam)==LBN_SELCHANGE){
             memset(szSelect,0,sizeof(szSelect));
             DlgDirSelect(hDlg,szSelect,IDC_LIST_FILES);
@@ -940,7 +1051,7 @@ BOOL FAR PASCAL FileDialogProc(HWND hDlg,WORD msg,WORD wParam,LONG lParam)
             return TRUE;
         }
 
-        // ファイルダブルクリック
+        // File double-click
         if(wParam==IDC_LIST_FILES && HIWORD(lParam)==LBN_DBLCLK){
             memset(szSelect,0,sizeof(szSelect));
             if(DlgDirSelect(hDlg,szSelect,IDC_LIST_FILES)){
@@ -972,7 +1083,7 @@ BOOL FAR PASCAL FileDialogProc(HWND hDlg,WORD msg,WORD wParam,LONG lParam)
             return TRUE;
         }
 
-        // ドライブ／[..] ダブルクリック
+        // Drive / [..] double-click
         if(wParam==IDC_LIST_DRIVES && HIWORD(lParam)==LBN_DBLCLK){
             hList=GetDlgItem(hDlg,IDC_LIST_DRIVES);
             idx=(int)SendMessage(hList,LB_GETCURSEL,0,0L);
@@ -1011,6 +1122,7 @@ BOOL FAR PASCAL FileDialogProc(HWND hDlg,WORD msg,WORD wParam,LONG lParam)
             return TRUE;
         }
 
+        // OK / Cancel
         switch(wParam)
         {
         case IDOK:
@@ -1083,62 +1195,98 @@ BOOL FAR PASCAL FileDialogProc(HWND hDlg,WORD msg,WORD wParam,LONG lParam)
     return FALSE;
 }
 
-// ファイル読み込み
-BOOL LoadFile(const char* path,char** outbuf,DWORD* outsize)
+/* ------------------------------------------------------------
+ * LoadFile16 - Win16 file loader with size check
+ * ------------------------------------------------------------ */
+static GUIErrorCode LoadFile16(const char* path,
+                               char** outbuf,
+                               DWORD* outsize,
+                               DWORD* out_filesize)
 {
     FILE* fp;
     long size;
     char* buf;
     size_t read_bytes;
+    struct find_t ff;
 
-    fp=fopen(path,"rb");
-    if(!fp) return FALSE;
+    if (outbuf)  *outbuf  = NULL;
+    if (outsize) *outsize = 0;
+    if (out_filesize) *out_filesize = 0;
 
-    fseek(fp,0,SEEK_END);
-    size=ftell(fp);
-    fseek(fp,0,SEEK_SET);
-    if(size<=0){
+    fp = fopen(path, "rb");
+    if (!fp)
+        return GUI_ERR_LF_OPEN;
+
+    /* Get file size via DOS API (FAT32-safe) */
+    if (_dos_findfirst(path, _A_NORMAL, &ff) != 0) {
         fclose(fp);
-        return FALSE;
+        return GUI_ERR_LF_OPEN;
     }
 
-    buf=(char*)malloc((size_t)size+1);
-    if(!buf){
+    size = (long)ff.size;
+    if (out_filesize) *out_filesize = (DWORD)size;
+
+    if (size < 0) {
         fclose(fp);
-        return FALSE;
+        return GUI_ERR_LF_SIZE;
     }
 
-    read_bytes=fread(buf,1,(size_t)size,fp);
+    if (size == 0) {
+        fclose(fp);
+        return GUI_ERR_LF_EMPTY;
+    }
+
+    if (size > MAX_TEXT) {
+        fclose(fp);
+        return GUI_ERR_LF_TOO_LARGE;
+    }
+
+    buf = (char*)malloc((size_t)size + 1);
+    if (!buf) {
+        fclose(fp);
+        return GUI_ERR_LF_READ;
+    }
+
+    read_bytes = fread(buf, 1, (size_t)size, fp);
     fclose(fp);
-    if(read_bytes!=(size_t)size){
+
+    if (read_bytes != (size_t)size) {
         free(buf);
-        return FALSE;
+        return GUI_ERR_LF_READ;
     }
 
-    buf[size]='\0';
-    *outbuf =buf;
-    *outsize=(DWORD)size;
-    return TRUE;
+    buf[size] = '\0';
+
+    if (outbuf)  *outbuf  = buf;
+    if (outsize) *outsize = (DWORD)size;
+
+    return GUI_ERR_OK;
 }
 
-// ファイル保存
-BOOL SaveFile(const char* path,const char* data,DWORD size)
+/* ------------------------------------------------------------
+ * SaveFile16 - Win16 version returning GUIErrorCode
+ * ------------------------------------------------------------ */
+static GUIErrorCode SaveFile16(const char* path, const char* data, DWORD size)
 {
     FILE* fp;
-    DWORD i;
-    fp=fopen(path,"w");
-    if(!fp) return FALSE;
-    for(i=0;i<size;i++){
-        if(fputc(data[i],fp)==EOF){
-            fclose(fp);
-            return FALSE;
-        }
-    }
+    size_t written;
+
+    fp = fopen(path, "w");
+    if (!fp)
+        return GUI_ERR_SF_OPEN;
+
+    written = fwrite(data, 1, (size_t)size, fp);
     fclose(fp);
-    return TRUE;
+
+    if (written != (size_t)size)
+        return GUI_ERR_SF_WRITE;
+
+    return GUI_ERR_OK;
 }
 
-// AutoSave ファイル名生成
+// ------------------------------
+// AutoSave filename generator (DOS 8.3)
+// ------------------------------
 void MakeAutoSaveName(const char* inpath,int shift,int mode,
                       char* out,int outsize)
 {
@@ -1172,3 +1320,32 @@ void MakeAutoSaveName(const char* inpath,int shift,int mode,
     if(outsize>0) out[outsize-1]='\0';
 }
 
+GUIErrorCode MMLToGUIError(const MMLErrorInfo* err)
+{
+    if (!err)
+        return GUI_ERR_MML_UNKNOWN;
+
+    switch (err->error_code)
+    {
+    case MML_ERR_NULL_INPUT:
+        return GUI_ERR_MML_NULL;
+
+    case MML_ERR_EMPTY_INPUT:
+        return GUI_ERR_MML_EMPTY;
+
+    case MML_ERR_OUTBUF:
+        return GUI_ERR_MML_OUTBUF;
+
+    case MML_ERR_BAD_SHIFT:
+        return GUI_ERR_MML_BAD_SHIFT;
+
+    case MML_ERR_BAD_MODE:
+        return GUI_ERR_MML_BAD_MODE;
+
+    case MML_ERR_OCTAVE_OUT_OF_RANGE:
+        return GUI_ERR_MML_OCTAVE;
+
+    default:
+        return GUI_ERR_MML_UNKNOWN;
+    }
+}
