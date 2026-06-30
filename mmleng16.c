@@ -1,7 +1,17 @@
 /* ============================================================
- *  mmleng16.c  (16bit向け・ストリーム版)
- *  32bit mmleng32.c の挙動を可能な限り忠実に再現
- *  ＋ 16bit向け安全化・軽量化
+ *  mmleng16.c  (16-bit stream-based engine)
+ *  Common MML Transposer Engine shared by:
+ *      - mmltrdos   (MS-DOS / CUI)
+ *      - mmltrw16   (Windows 16-bit / GUI)
+ *  Also compatible with 32-bit callers due to unified API.
+ *
+ *  Behavior closely follows the 32-bit mmleng32.c implementation,
+ *  with additional safety and lightweight adjustments for 16-bit.
+ *
+ *  Note:
+ *    The 16-bit engine can be embedded in 32-bit applications.
+ *    The reverse is not possible (32-bit engine cannot run in 16-bit),
+ *    except under DOS extender environments.
  * ============================================================ */
 
 #include <stdio.h>
@@ -9,15 +19,15 @@
 #include <ctype.h>
 #include "mmleng16.h"
 
-/* 16bit用固定バッファサイズ（FMT用） */
+/* Fixed buffer size for FMT in 16-bit builds */
 #define MAX_LINES 4096
 
-/* グローバル FMT 用バッファ */
+/* Global buffer for FMT processing */
 static char g_fmt_out[MAX_OUT];
 static int  g_comment_flags[MAX_LINES];
 
 /* ------------------------------------------------------------
- * 状態
+ * Engine state
  * ------------------------------------------------------------ */
 
 typedef struct {
@@ -32,7 +42,7 @@ typedef struct {
 } MMLState16;
 
 /* ------------------------------------------------------------
- * NOTE 名テーブル（32bit版と同じ）
+ * NOTE name table (same as 32-bit version)
  * ------------------------------------------------------------ */
 
 static const char* NOTE_NAMES[12] = {
@@ -40,7 +50,7 @@ static const char* NOTE_NAMES[12] = {
 };
 
 /* ------------------------------------------------------------
- * プロトタイプ
+ * Prototypes
  * ------------------------------------------------------------ */
 
 static int  note_to_num(const char* s, int* consumed);
@@ -58,7 +68,7 @@ static int  find_next_note_oct(const char* text, int start_ip,
                                int shift, int mode,
                                int cur_oct, int current_channel);
 
-/* FMT 関連（32bit版と同じ意味・順番） */
+/* FMT helpers (same meaning and order as 32-bit version) */
 static void mml_remove_blank_lines(char* buf);
 static void mml_trim_line_head_spaces(char* buf, int outsize);
 static void mml_insert_section_breaks(char* buf, int outsize);
@@ -67,11 +77,11 @@ static void mml_compress_spaces(char* buf);
 static void mml_mark_comment_lines(const char* buf, int* comment_flags);
 static void init_comment_flags(int* flags, int size);
 
-/* 16bit向け 軽量 itoa（sprintf 代替） */
+/* Lightweight 16-bit itoa (replacement for sprintf) */
 static void mml_itoa_16(int val, char* dst);
 
 /* ------------------------------------------------------------
- * 16bit向け 軽量 itoa
+ * Lightweight 16-bit itoa
  * ------------------------------------------------------------ */
 
 static void mml_itoa_16(int val, char* dst)
@@ -103,7 +113,7 @@ static void mml_itoa_16(int val, char* dst)
 }
 
 /* ------------------------------------------------------------
- * 音名 → 半音番号（32bit版と同じ）
+ * Convert NOTE name to semitone number (same as 32-bit)
  * ------------------------------------------------------------ */
 
 static int note_to_num(const char* s, int* consumed)
@@ -141,7 +151,7 @@ static int note_to_num(const char* s, int* consumed)
 }
 
 /* ------------------------------------------------------------
- * 改行正規化（CR/LF → '\n'）
+ * Normalize line breaks (CR/LF š '\n')
  * ------------------------------------------------------------ */
 
 static char get_normalized_char(const char** pp)
@@ -167,7 +177,7 @@ static char get_normalized_char(const char** pp)
 }
 
 /* ------------------------------------------------------------
- * 状態初期化
+ * Initialize engine state
  * ------------------------------------------------------------ */
 
 static void init_state16(MMLState16* st)
@@ -185,8 +195,8 @@ static void init_state16(MMLState16* st)
 }
 
 /* ------------------------------------------------------------
- * チャンネル判定（行頭 "A "～"Z " / "a " / "b "）
- *  index: A-Z -> 0-25, a->26, b->27
+ * Detect channel at line head ("A "?"Z ", "a ", "b ")
+ *  index: A?Z š 0?25, aš26, bš27
  * ------------------------------------------------------------ */
 
 static int detect_channel_at_line_head(const char* line_start,
@@ -215,8 +225,8 @@ static int detect_channel_at_line_head(const char* line_start,
 }
 
 /* ------------------------------------------------------------
- * oX の先の NOTE のオクターブをストリームで探す
- * （チャンネル切り替えで打ち切り：32bit と同じ思想）
+ * Stream-based search for the octave of the next NOTE after oX
+ * Stops when channel changes (same idea as 32-bit version)
  * ------------------------------------------------------------ */
 
 static int find_next_note_oct(const char* text, int start_ip,
@@ -227,7 +237,7 @@ static int find_next_note_oct(const char* text, int start_ip,
     int base_mode = mode & 7;
     int is_noise_shift = ((mode & MODE_NOISE_SHIFT) != 0);
 
-    (void)base_mode; /* 現状では未使用だが将来拡張用 */
+    (void)base_mode; /* Currently unused, reserved for future extensions */
 
     while (*p) {
         int ch_index;
@@ -347,7 +357,7 @@ static int find_next_note_oct(const char* text, int start_ip,
                 int dst_oct;
                 int dst_note;
 
-                /* Dチャンネルの場合は常に octave=0、noise_shift でもオクターブは変わらない */
+                /* D-channel: octave always fixed at 0, noise_shift does not change octave */
                 if (current_channel == 3) {
                     dst_oct = 0;
                     if (is_noise_shift) {
@@ -372,7 +382,7 @@ static int find_next_note_oct(const char* text, int start_ip,
                     }
                 }
 
-                (void)dst_note; /* ここでは octave だけ返せばよい */
+                (void)dst_note; /* Only the octave is needed here */
 
                 return dst_oct;
             }
@@ -385,7 +395,7 @@ static int find_next_note_oct(const char* text, int start_ip,
 }
 
 /* ------------------------------------------------------------
- * パス1：絶対オクターブ決定＋オクターブ範囲チェック
+ * Pass 1: determine absolute octave + octave range check
  * ------------------------------------------------------------ */
 
 static int scan_pass1(const char* text, int shift, int mode,
@@ -400,11 +410,11 @@ static int scan_pass1(const char* text, int shift, int mode,
     int base_mode = mode & 7;
     int is_noise_shift = ((mode & MODE_NOISE_SHIFT) != 0);
 
-    (void)base_mode; /* 現状では未使用だが、将来拡張用に残す */
+    (void)base_mode; /* Currently unused, reserved for future extensions */
 
     while (*p) {
 
-        /* 行頭チャンネル判定 */
+        /* Detect channel at line head */
         if (p == text || p[-1] == '\n') {
             int ch_index;
             char ch_char;
@@ -414,7 +424,7 @@ static int scan_pass1(const char* text, int shift, int mode,
             }
         }
 
-        /* ブロックコメント */
+        /* Block comment */
         if (p[0] == '/' && p[1] == '*') {
             p += 2;
             while (*p && !(p[0] == '*' && p[1] == '/')) {
@@ -431,7 +441,7 @@ static int scan_pass1(const char* text, int shift, int mode,
             continue;
         }
 
-        /* ';' 行コメント */
+        /* ';' line comment */
         if (*p == ';') {
             while (*p && *p != '\n') {
                 const char* q = p;
@@ -442,7 +452,7 @@ static int scan_pass1(const char* text, int shift, int mode,
             continue;
         }
 
-        /* '/' 行コメント */
+        /* '/' line comment */
         if (*p == '/' && !(p[1] == '*')) {
             while (*p && *p != '\n') {
                 const char* q = p;
@@ -453,7 +463,7 @@ static int scan_pass1(const char* text, int shift, int mode,
             continue;
         }
 
-        /* 空白・改行 */
+        /* Whitespace / line breaks */
         if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
             const char* q = p;
             while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') {
@@ -464,12 +474,12 @@ static int scan_pass1(const char* text, int shift, int mode,
             continue;
         }
 
-        /* < > */
+        /* < > relative octave */
         if (*p == '<' || *p == '>') {
             const char* q = p;
 
             if (current_channel == 3) {
-                /* Dch: オクターブは常に 0、< > は意味を持たない */
+                /* D-channel: octave always 0, '<' '>' have no effect */
                 while (*q == '<') q++;
                 while (*q == '>') q++;
                 cur_oct = 0;
@@ -483,7 +493,7 @@ static int scan_pass1(const char* text, int shift, int mode,
             continue;
         }
 
-        /* oX */
+        /* oX absolute octave */
         if (*p == 'o') {
             const char* q = p + 1;
             int n = 0, has_digit = 0;
@@ -493,7 +503,7 @@ static int scan_pass1(const char* text, int shift, int mode,
             }
 
             if (current_channel == 3) {
-                /* Dch: oX はすべて「o0扱い」、オクターブは常に 0 */
+                /* D-channel: treat all oX as o0, octave always 0 */
                 cur_oct = 0;
                 p = q;
                 continue;
@@ -504,7 +514,7 @@ static int scan_pass1(const char* text, int shift, int mode,
             continue;
         }
 
-        /* @コマンド */
+        /* @ command */
         if (*p == '@') {
             const char* q = p + 1;
             if (*q == '@') q++;
@@ -515,7 +525,7 @@ static int scan_pass1(const char* text, int shift, int mode,
             continue;
         }
 
-        /* 裸の数字 */
+        /* Bare numbers */
         if (*p >= '0' && *p <= '9') {
             const char* q = p;
             while (*q >= '0' && *q <= '9') q++;
@@ -523,7 +533,7 @@ static int scan_pass1(const char* text, int shift, int mode,
             continue;
         }
 
-        /* タイ */
+        /* Tie symbols */
         if (*p == '&' || *p == '^') {
             p++;
             continue;
@@ -548,7 +558,7 @@ static int scan_pass1(const char* text, int shift, int mode,
                 int dst_note;
 
                 if (current_channel == 3) {
-                    /* Dch: octave=0固定、noise_shift でもオクターブは変わらない */
+                    /* D-channel: octave fixed at 0, noise_shift does not change octave */
                     dst_oct = 0;
                     if (is_noise_shift) {
                         int nn = num + shift;
@@ -583,7 +593,7 @@ static int scan_pass1(const char* text, int shift, int mode,
                     }
                 }
 
-                /* 最初の NOTE のオクターブだけ記録（32bit と同じ思想） */
+                /* Record only the octave of the first NOTE (same idea as 32-bit) */
                 if (current_channel >= 0 && current_channel < MAX_CHANNELS) {
                     if (!st->first_note_ch[current_channel]) {
                         st->first_note_ch[current_channel] = 1;
@@ -602,7 +612,7 @@ static int scan_pass1(const char* text, int shift, int mode,
             }
         }
 
-        /* その他 */
+        /* Other characters */
         p++;
     }
 
@@ -610,8 +620,8 @@ static int scan_pass1(const char* text, int shift, int mode,
 }
 
 /* ------------------------------------------------------------
- * パス2：本番出力（ストリーム）
- * 32bit mml_render_common の完全移植版
+ * Pass 2: final output (stream-based)
+ * Complete port of 32-bit mml_render_common
  * ------------------------------------------------------------ */
 static int render_pass2(const char* text, int shift, int mode,
                         MMLState16* st, char* outbuf, int outsize)
@@ -619,23 +629,23 @@ static int render_pass2(const char* text, int shift, int mode,
     const char* p = text;
     int outpos = 0;
 
-    /* mode: 3bit FMT/REL/ABS + Dch拡張ビット */
-    int is_fmt  = (mode & 4) ? 1 : 0;  /* 整形 */
-    int is_rel  = (mode & 2) ? 1 : 0;  /* 相対表記 */
-    int is_abs  = (mode & 1) ? 1 : 0;  /* 絶対表記 */
+    /* mode: 3-bit FMT/REL/ABS + D-channel extension bit */
+    int is_fmt  = (mode & 4) ? 1 : 0;  /* Formatting */
+    int is_rel  = (mode & 2) ? 1 : 0;  /* Relative notation */
+    int is_abs  = (mode & 1) ? 1 : 0;  /* Absolute notation */
     int is_noise_shift = (mode & MODE_NOISE_SHIFT) ? 1 : 0;
 
-    /* Smart Rewrite は下位2bitが 00 のとき */
+    /* Smart Rewrite is enabled when lower 2 bits are 00 */
     int is_smart = (!is_rel && !is_abs);
 
-    /* Pure Layout 判定（32bitと同じ） */
+    /* Pure Layout detection (same as 32-bit) */
     int is_pure_layout = (!is_fmt && (is_rel || is_abs));
 
     int cur_oct = 4;
     int current_channel = -1;
     char current_ch_char = ' ';
 
-    /* 32bit版と同じ NOTE 状態管理 */
+    /* NOTE state management (same behavior as 32-bit) */
     int first_note_done[MAX_CHANNELS];
     int last_oct[MAX_CHANNELS];
     int global_first_note_done = 0;
@@ -651,7 +661,7 @@ static int render_pass2(const char* text, int shift, int mode,
         last_oct[i] = -999;
     }
 
-    /* Smart Rewrite 用 prev_oct 初期化（32bitと同じ） */
+    /* Initialize prev_oct for Smart Rewrite (same as 32-bit) */
     st->prev_oct_global = st->last_oct_global;
     if (st->prev_oct_global == -999) st->prev_oct_global = 4;
 
@@ -661,11 +671,11 @@ static int render_pass2(const char* text, int shift, int mode,
     }
 
     /* --------------------------------------------------------
-     * ストリーム走査開始
+     * Start stream traversal
      * -------------------------------------------------------- */
     while (*p && outpos < outsize - 1) {
 
-        /* 行頭チャンネル判定 */
+        /* Detect channel at line head */
         if (p == text || p[-1] == '\n') {
             int ch_index;
             char ch_char;
@@ -675,7 +685,7 @@ static int render_pass2(const char* text, int shift, int mode,
             }
         }
 
-        /* ブロックコメント：そのままコピー */
+        /* Block comment: copy as-is */
         if (p[0] == '/' && p[1] == '*') {
             const char* q = p;
             char ch;
@@ -696,7 +706,7 @@ static int render_pass2(const char* text, int shift, int mode,
             continue;
         }
 
-        /* ';' 行コメント */
+        /* ';' line comment */
         if (*p == ';') {
             const char* q = p;
             char ch;
@@ -709,7 +719,7 @@ static int render_pass2(const char* text, int shift, int mode,
             continue;
         }
 
-        /* '/' 行コメント */
+        /* '/' line comment */
         if (*p == '/' && !(p[1] == '*')) {
             const char* q = p;
             char ch;
@@ -722,7 +732,7 @@ static int render_pass2(const char* text, int shift, int mode,
             continue;
         }
 
-        /* 空白・改行 */
+        /* Whitespace and line breaks */
         if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
             const char* q = p;
             char ch;
@@ -734,13 +744,13 @@ static int render_pass2(const char* text, int shift, int mode,
             continue;
         }
 
-        /* < > */
+        /* < > relative octave */
         if (*p == '<' || *p == '>') {
             const char* q = p;
 
-            /* 32bitと同じ：<> 自体は出力しない */
+            /* Same as 32-bit: do not output '<' or '>' themselves */
             if (current_channel == 3) {
-                /* Dch: octave=0固定、<>は無効 */
+                /* D-channel: octave always 0, '<' '>' have no effect */
                 while (*q == '<') q++;
                 while (*q == '>') q++;
                 cur_oct = 0;
@@ -754,7 +764,7 @@ static int render_pass2(const char* text, int shift, int mode,
             continue;
         }
 
-        /* oX */
+        /* oX absolute octave */
         if (*p == 'o') {
             const char* q = p + 1;
             int n = 0;
@@ -767,15 +777,15 @@ static int render_pass2(const char* text, int shift, int mode,
             }
 
             if (!has_digit) {
-                /* 単独 'o' はそのまま出力 */
+                /* Single 'o' without digits š output as-is */
                 if (outpos < outsize - 1) outbuf[outpos++] = 'o';
                 p++;
                 continue;
             }
 
-            /* Dch の oX は Smart Rewrite の対象外（32bitと同じ） */
+            /* D-channel oX is excluded from Smart Rewrite (same as 32-bit) */
             if (current_channel == 3) {
-                /* noise_shift OFF のときは元の oX を壊さない */
+                /* When noise_shift is OFF, preserve original oX */
                 if (!is_noise_shift) {
                     if (outpos < outsize - 1) outbuf[outpos++] = 'o';
                     {
@@ -788,11 +798,11 @@ static int render_pass2(const char* text, int shift, int mode,
                     p = q;
                     continue;
                 }
-                /* noise_shift ON のときは Smart Rewrite する */
+                /* When noise_shift is ON, allow Smart Rewrite */
             }
 
             if (is_smart) {
-                /* Smart Rewrite: 次の NOTE の octave に書き換える */
+                /* Smart Rewrite: rewrite to the octave of the next NOTE */
                 int base_oct = find_next_note_oct(text,
                                                   (int)(q - text),
                                                   shift,
@@ -810,26 +820,26 @@ static int render_pass2(const char* text, int shift, int mode,
                         outbuf[outpos++] = tmp[k++];
                 }
 
-                /* prev_oct を同期 */
+                /* Synchronize prev_oct */
                 if (current_channel >= 0 && current_channel < MAX_CHANNELS)
                     st->prev_oct_ch[current_channel] = use_oct;
                 else
                     st->prev_oct_global = use_oct;
 
-                /* cur_oct はソース上の相対オクターブとして n のまま */
+                /* cur_oct remains the source-relative octave n */
                 cur_oct = n;
 
                 p = q;
                 continue;
             }
 
-            /* 非スマート：oX は出力せず cur_oct だけ更新 */
+            /* Non-smart mode: do not output oX, only update cur_oct */
             cur_oct = n;
             p = q;
             continue;
         }
 
-        /* @コマンド */
+        /* @ command */
         if (*p == '@') {
             const char* q = p + 1;
             if (outpos < outsize - 1) outbuf[outpos++] = '@';
@@ -850,7 +860,7 @@ static int render_pass2(const char* text, int shift, int mode,
             continue;
         }
 
-        /* 裸の数字 */
+        /* Bare numbers */
         if (*p >= '0' && *p <= '9') {
             const char* q = p;
             while (*q >= '0' && *q <= '9' && outpos < outsize - 1) {
@@ -861,7 +871,7 @@ static int render_pass2(const char* text, int shift, int mode,
             continue;
         }
 
-        /* タイ & ^ */
+        /* Tie symbols & and ^ */
         if (*p == '&' || *p == '^') {
             if (outpos < outsize - 1) outbuf[outpos++] = *p;
             p++;
@@ -898,13 +908,13 @@ static int render_pass2(const char* text, int shift, int mode,
                 int ch_idx = current_channel;
 
                 /* ----------------------------------------------------
-                 * Dチャンネル（ノイズ）専用処理
+                 * D-channel (noise) specific processing
                  * ---------------------------------------------------- */
                 if (ch_idx == 3) {
-                    /* octave=0 固定 */
+                    /* Octave always fixed at 0 */
                     dst_oct = 0;
 
-                    /* noise_shift ON のときだけ note を回す */
+                    /* noise_shift ON: shift note number */
                     if (is_noise_shift) {
                         int nn = num + shift;
                         dst_note = nn % 12;
@@ -914,7 +924,7 @@ static int render_pass2(const char* text, int shift, int mode,
                     }
                 }
                 else {
-                    /* 通常チャンネル */
+                    /* Normal channels */
                     int semis;
 
                     if (cur_oct < 0) cur_oct = 0;
@@ -929,12 +939,12 @@ static int render_pass2(const char* text, int shift, int mode,
                         dst_oct -= 1;
                     }
 
-                    /* パス1で範囲チェック済みなのでここでは不要 */
+                    /* Range check already done in Pass 1 */
                 }
 
                 name = NOTE_NAMES[dst_note];
 
-                /* 長さ読み取り */
+                /* Read length digits */
                 p += consumed;
                 while (*p >= '0' && *p <= '9' && lenpos < (int)sizeof(lenbuf)-1) {
                     lenbuf[lenpos++] = *p;
@@ -943,13 +953,13 @@ static int render_pass2(const char* text, int shift, int mode,
                 lenbuf[lenpos] = '\0';
 
                 /* ----------------------------------------------------
-                 * Dチャンネル（ノイズ）出力（32bit完全互換）
+                 * D-channel (noise) output (fully matches 32-bit)
                  * ---------------------------------------------------- */
                 if (ch_idx == 3) {
                     int already_has_o0 = 0;
                     int k;
 
-                    /* すでに o0 が出ているか確認 */
+                    /* Check if o0 already exists */
                     for (k = 0; k < outpos - 1; k++) {
                         if (outbuf[k] == 'o' && outbuf[k + 1] == '0') {
                             already_has_o0 = 1;
@@ -957,7 +967,7 @@ static int render_pass2(const char* text, int shift, int mode,
                         }
                     }
 
-                    /* 最初の NOTE の前に o0 を補完 */
+                    /* Insert o0 before the first NOTE */
                     if (!already_has_o0) {
                         if (outpos > 0 &&
                             outbuf[outpos - 1] != ' ' &&
@@ -971,7 +981,7 @@ static int render_pass2(const char* text, int shift, int mode,
                         if (outpos < outsize - 1) outbuf[outpos++] = ' ';
                     }
 
-                    /* NOTE 出力 */
+                    /* Output NOTE */
                     k = 0;
                     while (name[k] && outpos < outsize - 1)
                         outbuf[outpos++] = name[k++];
@@ -984,7 +994,7 @@ static int render_pass2(const char* text, int shift, int mode,
                 }
 
                 /* ----------------------------------------------------
-                 * Smart Rewrite（通常チャンネル）
+                 * Smart Rewrite (normal channels)
                  * ---------------------------------------------------- */
                 if (is_smart) {
                     int* p_prev;
@@ -992,7 +1002,7 @@ static int render_pass2(const char* text, int shift, int mode,
                     int diff;
                     int k;
 
-                    /* prev_oct を取得 */
+                    /* Get prev_oct */
                     if (ch_idx >= 0 && ch_idx < MAX_CHANNELS)
                         p_prev = &st->prev_oct_ch[ch_idx];
                     else
@@ -1000,7 +1010,7 @@ static int render_pass2(const char* text, int shift, int mode,
 
                     prev = *p_prev;
 
-                    /* <> の振り直し */
+                    /* Rewrite <> */
                     diff = dst_oct - prev;
                     if (diff > 0) {
                         for (k = 0; k < diff && outpos < outsize - 1; k++)
@@ -1011,7 +1021,7 @@ static int render_pass2(const char* text, int shift, int mode,
                             outbuf[outpos++] = '<';
                     }
 
-                    /* NOTE 出力 */
+                    /* Output NOTE */
                     k = 0;
                     while (name[k] && outpos < outsize - 1)
                         outbuf[outpos++] = name[k++];
@@ -1020,15 +1030,15 @@ static int render_pass2(const char* text, int shift, int mode,
                     while (lenbuf[k] && outpos < outsize - 1)
                         outbuf[outpos++] = lenbuf[k++];
 
-                    /* prev_oct 更新 */
+                    /* Update prev_oct */
                     *p_prev = dst_oct;
 
                     continue;
                 }
 
                 /* ----------------------------------------------------
-                 * 非スマート（-a / -r）通常チャンネル
-                 * 32bit mml_render_common と完全一致
+                 * Non-smart mode (-a / -r), normal channels
+                 * Fully matches 32-bit mml_render_common
                  * ---------------------------------------------------- */
                 {
                     int oct = dst_oct;
@@ -1040,13 +1050,14 @@ static int render_pass2(const char* text, int shift, int mode,
                     int need_prefix = 0;
                     int j;
 
-                    /* lenbuf をコピー */
+                    /* Copy lenbuf */
                     while (lenbuf[nlenpos] && nlenpos < (int)sizeof(nlen)-1) {
                         nlen[nlenpos] = lenbuf[nlenpos];
                         nlenpos++;
                     }
                     nlen[nlenpos] = '\0';
 
+                    /* Select per-channel or global state */
                     if (ch_idx >= 0 && ch_idx < MAX_CHANNELS) {
                         p_first = &first_note_done[ch_idx];
                         p_last  = &last_oct[ch_idx];
@@ -1055,6 +1066,7 @@ static int render_pass2(const char* text, int shift, int mode,
                         p_last  = &global_last_oct;
                     }
 
+                    /* First NOTE: always output oX */
                     if (!(*p_first)) {
                         need_prefix = 1;
                         *p_first = 1;
@@ -1081,7 +1093,7 @@ static int render_pass2(const char* text, int shift, int mode,
                         }
                     }
 
-                    /* oX 出力 */
+                    /* Output oX prefix */
                     if (need_prefix) {
                         char tmp[16];
                         int k2;
@@ -1106,7 +1118,7 @@ static int render_pass2(const char* text, int shift, int mode,
                             outbuf[outpos++] = ' ';
                     }
 
-                    /* NOTE 出力 */
+                    /* Output NOTE */
                     j = 0;
                     while (nname[j] && outpos < outsize - 1)
                         outbuf[outpos++] = nname[j++];
@@ -1120,7 +1132,7 @@ static int render_pass2(const char* text, int shift, int mode,
             }
         }
 
-        /* その他1文字 */
+        /* Other single characters */
         if (outpos < outsize - 1) outbuf[outpos++] = *p;
         p++;
     }
@@ -1130,7 +1142,7 @@ static int render_pass2(const char* text, int shift, int mode,
 }
 
 /* ------------------------------------------------------------
- * コメント行マーキング（32bit版と同じロジック＋MAX_LINESガード）
+ * Comment line marking (same logic as 32-bit + MAX_LINES guard)
  * ------------------------------------------------------------ */
 static void mml_mark_comment_lines(const char* buf, int* comment_flags)
 {
@@ -1177,7 +1189,7 @@ static void init_comment_flags(int* flags, int size)
 }
 
 /* ------------------------------------------------------------
- * FMT: 空行削除（32bit版と同じロジック）
+ * FMT: remove blank lines (same logic as 32-bit version)
  * ------------------------------------------------------------ */
 static void mml_remove_blank_lines(char* buf)
 {
@@ -1201,6 +1213,7 @@ static void mml_remove_blank_lines(char* buf)
             break;
         }
 
+        /* Copy comment lines as-is */
         if (at_line_start && comment_flags[line]) {
             while (*src && *src != '\n') *dst++ = *src++;
             if (*src == '\n') {
@@ -1215,14 +1228,17 @@ static void mml_remove_blank_lines(char* buf)
 
         if (at_line_start) {
 
+            /* Remove leading blank line */
             if (line == 0 && *src == '\n') {
                 src++;
                 line++;
                 continue;
             }
 
+            /* Blank line */
             if (*src == '\n') {
 
+                /* Keep one blank line after comment */
                 if (after_comment) {
                     *dst++ = *src++;
                     line++;
@@ -1232,6 +1248,7 @@ static void mml_remove_blank_lines(char* buf)
                     continue;
                 }
 
+                /* Remove blank lines inside sections */
                 if (current_section == 1 || current_section == 2) {
                     src++;
                     line++;
@@ -1239,6 +1256,7 @@ static void mml_remove_blank_lines(char* buf)
                     continue;
                 }
 
+                /* Allow only one blank line */
                 blank_count++;
                 if (blank_count > 1) {
                     src++;
@@ -1253,6 +1271,7 @@ static void mml_remove_blank_lines(char* buf)
                 continue;
             }
 
+            /* Detect section type */
             {
                 const char* p2 = src;
                 while (*p2 == ' ' || *p2 == '\t') p2++;
@@ -1284,7 +1303,7 @@ static void mml_remove_blank_lines(char* buf)
 }
 
 /* ------------------------------------------------------------
- * FMT: 行頭スペース削除
+ * FMT: trim leading spaces at line head
  * ------------------------------------------------------------ */
 static void mml_trim_line_head_spaces(char* buf, int outsize)
 {
@@ -1299,6 +1318,7 @@ static void mml_trim_line_head_spaces(char* buf, int outsize)
 
     while (buf[i] && j < max_limit - 1) {
 
+        /* Copy comment lines as-is */
         if (line < MAX_LINES && comment_flags[line]) {
             while (buf[i] && j < max_limit - 1) {
                 out[j++] = buf[i++];
@@ -1307,6 +1327,7 @@ static void mml_trim_line_head_spaces(char* buf, int outsize)
             continue;
         }
 
+        /* Trim spaces at line head */
         if (i == 0 || buf[i-1] == '\n') {
             while (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r')
                 i++;
@@ -1324,7 +1345,7 @@ static void mml_trim_line_head_spaces(char* buf, int outsize)
 }
 
 /* ------------------------------------------------------------
- * FMT: セクション間の空行挿入
+ * FMT: insert blank lines between sections
  * ------------------------------------------------------------ */
 static void mml_insert_section_breaks(char* buf, int outsize)
 {
@@ -1343,6 +1364,7 @@ static void mml_insert_section_breaks(char* buf, int outsize)
 
     while (buf[i] && j < max_limit - 1) {
 
+        /* Copy comment lines as-is */
         if (line < MAX_LINES && comment_flags[line]) {
             while (buf[i] && buf[i] != '\n' && j < max_limit - 1)
                 out[j++] = buf[i++];
@@ -1353,6 +1375,7 @@ static void mml_insert_section_breaks(char* buf, int outsize)
             continue;
         }
 
+        /* Detect section type */
         current_section = 0;
         current_channel = 0;
 
@@ -1371,6 +1394,7 @@ static void mml_insert_section_breaks(char* buf, int outsize)
             }
         }
 
+        /* Insert blank line between sections */
         if (!after_comment &&
             prev_section != 0 &&
             current_section != 0)
@@ -1383,6 +1407,7 @@ static void mml_insert_section_breaks(char* buf, int outsize)
             }
         }
 
+        /* Copy line */
         while (buf[i] && buf[i] != '\n' && j < max_limit - 1)
             out[j++] = buf[i++];
         if (buf[i] == '\n' && j < max_limit - 1)
@@ -1400,7 +1425,7 @@ static void mml_insert_section_breaks(char* buf, int outsize)
 }
 
 /* ------------------------------------------------------------
- * FMT: スペース圧縮
+ * FMT: compress spaces
  * ------------------------------------------------------------ */
 static void mml_compress_spaces(char* buf)
 {
@@ -1412,6 +1437,7 @@ static void mml_compress_spaces(char* buf)
 
     while (buf[r]) {
 
+        /* Copy comment lines as-is */
         if (line < MAX_LINES && comment_flags[line]) {
             while (buf[r]) {
                 buf[w++] = buf[r++];
@@ -1420,6 +1446,7 @@ static void mml_compress_spaces(char* buf)
             continue;
         }
 
+        /* Compress spaces */
         if (buf[r] == ' ') {
             if (!space) {
                 buf[w++] = ' ';
@@ -1438,7 +1465,7 @@ static void mml_compress_spaces(char* buf)
 }
 
 /* ------------------------------------------------------------
- * 外向き API（32bit版と完全互換）
+ * Public API (fully compatible with 32-bit version)
  * ------------------------------------------------------------ */
 int mml_process(const char* in_text, int shift, int mode,
                 char* outbuf, int outsize, MMLErrorInfo* err_info)
@@ -1467,7 +1494,7 @@ int mml_process(const char* in_text, int shift, int mode,
         return MML_ERR_BAD_SHIFT;
     }
 
-    /* 下位3bitのみでモードチェック（0〜6） */
+    /* Validate mode using lower 3 bits only (0?6) */
     base_mode = mode & 7;
     if (base_mode < 0 || base_mode > 6) {
         if (err_info) err_info->error_code = MML_ERR_BAD_MODE;
@@ -1476,16 +1503,16 @@ int mml_process(const char* in_text, int shift, int mode,
 
     init_state16(&st);
 
-    /* パス1：絶対オクターブ決定＋オクターブ範囲チェック */
+    /* Pass 1: determine absolute octave + range check */
     {
         int res = scan_pass1(in_text, shift, mode, &st, err_info);
         if (res != 0) return res;
     }
 
-    /* パス2：本番出力 */
+    /* Pass 2: final rendering */
     outlen = render_pass2(in_text, shift, mode, &st, outbuf, outsize);
 
-    /* FMT */
+    /* Formatting (FMT) */
     if (mode & 4) {
         mml_remove_blank_lines(outbuf);
         mml_trim_line_head_spaces(outbuf, outsize);
@@ -1493,12 +1520,10 @@ int mml_process(const char* in_text, int shift, int mode,
         mml_compress_spaces(outbuf);
     }
 
-    /* 改行正規化 */
+    /* Normalize CR š LF */
     for (i = 0; outbuf[i]; i++) {
         if (outbuf[i] == '\r') outbuf[i] = '\n';
     }
 
     return (int)strlen(outbuf);
 }
-
-
