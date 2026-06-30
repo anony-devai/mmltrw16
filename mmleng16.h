@@ -1,5 +1,14 @@
 /* ============================================================
- * mmleng16.h  (16bit DOS / C89 準拠・32bit版互換インタフェース)
+ * mmleng16.h  (16-bit DOS / C89 compliant, 32-bit compatible interface)
+ *
+ * Common MML Transposer Engine interface used by:
+ *      - mmltrdos   (MS-DOS / CUI)
+ *      - mmltrw16   (Windows 16-bit / GUI)
+ * and callable from 32-bit applications as well.
+ *
+ * The API is fully shared with the 32-bit engine, allowing
+ * cross-version compatibility. However, the 32-bit engine
+ * cannot be used in 16-bit environments (except via DOS extenders).
  * ============================================================ */
 
 #ifndef MMLENG16_H_INCLUDED
@@ -10,83 +19,64 @@ extern "C" {
 #endif
 
 /* ------------------------------------------------------------
- * バッファ制限（16bit向け）
+ * Buffer limits for the 16-bit environment
  * ------------------------------------------------------------ */
 #define MAX_TEXT     8192
 #define MAX_OUT      16384
-#define MAX_TOKENS   2048   /* 16bit版では内部では未使用だが互換のため残す */
 #define MAX_RAW_LEN  128
 
-/* 最大チャンネル数: 28
- * (大文字 A-Z = 26) + (小文字 a, b = 2)
+/* Maximum number of channels: 28
+ * (Uppercase A–Z = 26) + (Lowercase a, b = 2)
  */
 #define MAX_CHANNELS 28
 
 /* ------------------------------------------------------------
- * トークン種別（32bit版と同じ定義）
+ * Error codes (fully shared with the 32-bit version)
  * ------------------------------------------------------------ */
-typedef enum {
-    TK_NONE = 0,
-    TK_NOTE,
-    TK_REST,
-    TK_RAW
-} MMLTokenType;
+#define MML_ERR_NULL_INPUT             -1  /* Input/output pointer is NULL */
+#define MML_ERR_EMPTY_INPUT            -2  /* Input string is empty */
+#define MML_ERR_OUTBUF                 -3  /* Output buffer size is invalid (<= 0) */
+#define MML_ERR_BAD_SHIFT              -4  /* Transpose value out of range (-12 to +12) */
+#define MML_ERR_BAD_MODE               -5  /* Mode value out of range */
+/* Note:
+ * MML_ERR_PARSE is reserved for the 32-bit token-based parser.
+ * The 16-bit engine does not use tokenization and never returns this code.
+ */
+#define MML_ERR_PARSE                  -6  /* Reserved for 32-bit token parser (unused in 16-bit) */
+#define MML_ERR_OCTAVE_OUT_OF_RANGE   -10 /* Octave exceeded limit due to transposition */
 
 /* ------------------------------------------------------------
- * エラーコード（32bit版と完全共通）
+ * Mode flags (3-bit base + D-channel extension bit)
+ *
+ * 3-bit FMT / REL / ABS
+ *   bit2 (4): FMT  – Enable formatting
+ *   bit1 (2): REL  – Relative notation (<>)
+ *   bit0 (1): ABS  – Absolute notation (oX)
  * ------------------------------------------------------------ */
-#define MML_ERR_NULL_INPUT             -1  /* 入力/出力ポインタがNULL */
-#define MML_ERR_EMPTY_INPUT            -2  /* 入力文字列が空 */
-#define MML_ERR_OUTBUF                 -3  /* 出力バッファサイズが不正(0以下) */
-#define MML_ERR_BAD_SHIFT              -4  /* 移調幅が範囲外 (-12～12 以外) */
-#define MML_ERR_BAD_MODE               -5  /* モード指定が範囲外 */
-#define MML_ERR_PARSE                  -6  /* 32bit Token版専用（16bitでは未使用） */
-#define MML_ERR_OCTAVE_OUT_OF_RANGE   -10 /* 移調によりオクターブ限界を突破 */
+#define MODE_PURE        0   /* 0000 : Pure (no formatting, reassign oX/<> automatically) */
+#define MODE_PURE_ABS    1   /* 0001 : Pure + Abs (no formatting) */
+#define MODE_PURE_REL    2   /* 0010 : Pure + Rel (no formatting) */
+#define MODE_FMT         4   /* 0100 : Format enabled (reassign oX/<> automatically) */
+#define MODE_FMT_ABS     5   /* 0101 : Format + Abs */
+#define MODE_FMT_REL     6   /* 0110 : Format + Rel */
+
+/* D-channel (noise) note-shift enable flag (-d option)
+ * When enabled, only D-channel notes are shifted and octave is fixed at o0.
+ */
+#define MODE_NOISE_SHIFT 8   /* 1000 : Shift notes only on D-channel, keep o0 fixed */
 
 /* ------------------------------------------------------------
- * モード体系（3bit + Dch拡張ビット）
- * ------------------------------------------------------------ */
-/* 3bit FMT/REL/ABS
-   bit2 (4): FMT  … 整形するかどうか
-   bit1 (2): REL  … 相対表記（<>）
-   bit0 (1): ABS  … 絶対表記（oX） */
-
-#define MODE_PURE        0   /* 0000 : Pure（整形なし・oX/<> 振り直し） */
-#define MODE_PURE_ABS    1   /* 0001 : Pure + Abs（整形なし） */
-#define MODE_PURE_REL    2   /* 0010 : Pure + Rel（整形なし） */
-#define MODE_FMT         4   /* 0100 : FMT（整形あり・oX/<> 振り直し） */
-#define MODE_FMT_ABS     5   /* 0101 : FMT + Abs（整形あり） */
-#define MODE_FMT_REL     6   /* 0110 : FMT + Rel（整形あり） */
-
-/* Dチャンネル（ノイズ）音符シフト有効化フラグ (-d オプション用) */
-#define MODE_NOISE_SHIFT 8   /* 1000 : Dchのみ音符をシフトし、o0固定 */
-
-/* ------------------------------------------------------------
- * エラー詳細情報（32bit版と同じ構造）
+ * Detailed error information (same structure as 32-bit version)
  * ------------------------------------------------------------ */
 typedef struct {
-    int  error_code;       /* エラーコード (MML_ERR_xxx) */
-    char channel_char;     /* エラーが発生したチャンネル文字 (A-Z, a, b) */
-    int  line_number;      /* エラーが発生したMMLの行番号 (1から開始) */
-    int  calculated_value; /* 限界突破した際の、計算上の不正なオクターブ値 */
+    int  error_code;       /* Error code (MML_ERR_xxx) */
+    char channel_char;     /* Channel character where the error occurred (A–Z, a, b) */
+    int  line_number;      /* Line number in the MML text (starting from 1) */
+    int  calculated_value; /* Invalid octave value calculated when exceeding limits */
 } MMLErrorInfo;
 
 /* ------------------------------------------------------------
- * Token 構造体（16bit内部では使わないが、32bitとの互換用に定義）
- * ------------------------------------------------------------ */
-typedef struct {
-    MMLTokenType type;
-    int  octave;                 /* NOTE/REST 用の絶対オクターブ */
-    int  note;                   /* 0～11, REST のときは -1 */
-    char length[16];             /* "4", "8.", "16" など */
-    char raw[MAX_RAW_LEN];       /* 生テキスト（内部 RAW） */
-    int  is_literal_o0;          /* o0 をそのまま残すかどうか */
-    int  is_raw_ox;              /* oX を RAW として扱うかどうか */
-    int  is_comment;             /* コメント由来トークンかどうか */
-} Token;
-
-/* ------------------------------------------------------------
- * 外部公開 API（32bit版と同じシグネチャ）
+ * Public API (same signature as the 32-bit version)
  * ------------------------------------------------------------ */
 int mml_process(const char* in_text, int shift, int mode,
                 char* outbuf, int outsize, MMLErrorInfo* err_info);
@@ -96,4 +86,3 @@ int mml_process(const char* in_text, int shift, int mode,
 #endif
 
 #endif /* MMLENG16_H_INCLUDED */
-
