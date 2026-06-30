@@ -1,104 +1,140 @@
 # MML Transposer Win16 (mmltrw16)
 
-NSF 用 MML ファイル移調ツール「MML Transposer」の  
-Windows 1.x / 2.x / 3.x 全対応 Win16 統合版です。
+This is the Win16 Unified Edition of the NSF-style MML transposition tool “MML Transposer,”  
+designed to run on all versions of Windows 1.x, 2.x, and 3.x.
 
-本バージョンは、従来の Win3.x 版（mmltrw30）・Win2.0 版（mmltrw20）を  
-1 本に統合し、環境に応じて機能を自動切り替えるフォールバック方式を採用しています。
-
----
-
-## 対応環境
-
-- Windows 3.x（D&D 対応）
-- Windows 2.0（自作ファイルダイアログ）
-- Windows 1.0（フォールバックにより動作する可能性あり）
-- Windows 95 / 98 の Win16 サブシステムでも動作します
-
-※ Windows 1.x / 2.x / 3.x の実機環境は未所持のため、実機での動作は未確認です  
-　（Windows 95 上では動作確認済み）
+The application automatically adapts to the capabilities of each Win16 environment,  
+providing a single executable that works across all Win16-based systems.
 
 ---
 
-## ファイルの開き方
+## Supported Environments
 
-本アプリケーションは、環境に応じてファイル入力方式が自動的に切り替わります。
+- Windows 3.x (drag & drop available)
+- Windows 1.x / 2.x / 3.x (standard or custom file dialog depending on COMMDLG.DLL)
+- Windows 95 / 98 Win16 subsystem
 
-### ● Win3.x（SHELL.DLL あり）
-- ドラッグ＆ドロップでファイルを開けます  
-- **D&D した瞬間に自動保存**（w30 と同じ動作）  
-- **Alt キーでメニューを一時表示できます**
-
-### ● Win1.x / Win2.x（SHELL.DLL なし）
-- メニュー **File → Open…** から開きます  
-- 自作ファイルダイアログを使用  
-- **ファイルを開いた瞬間に自動保存**（w20 と同じ動作）
+Actual hardware for Windows 1.x / 2.x / 3.x is not available, so real-machine behavior is unverified.  
+Operation has been confirmed on Windows 95 (Virtual PC 2007).
 
 ---
 
-## Auto チェック時の動作
+## Drag & Drop (SHELL.DLL)
 
-- **Auto ON**  
-  → D&D または Open 時に即自動保存  
-- **Auto OFF**  
-  → Quick / Save ボタンが有効になります
+Drag & drop is available only when **SHELL.DLL** is present.  
+This applies to all Windows 3.x systems.
 
----
-
-## Win1.0 / Win2.0 両対応のフォールバック
-
-Windows 1.x と 2.x では利用可能なコントロールが異なるため、  
-ファイルダイアログは次のように動作します。
-
-- COMBOBOX の生成を試みる  
-- 成功 → Win2.0 互換 UI  
-- 失敗 → Win1.0 互換 UI（LISTBOX にフォールバック）
+If **Auto** is enabled, the file is saved immediately after drag & drop.
 
 ---
 
-## 画面構成（メインダイアログ）
+## File Dialog Behavior (COMMDLG.DLL)
 
-- ファイル名表示  
-- 移調量（水平スクロールバー / Spin / Edit）  
+File dialog selection depends solely on the presence of **COMMDLG.DLL**,  
+not on the Windows version.
+
+- If **COMMDLG.DLL is present**  
+  → The standard Windows common file dialog is used.  
+  (Windows 3.1 always includes COMMDLG.DLL.)
+
+- If **COMMDLG.DLL is not present**  
+  → A custom file dialog is used.  
+  (Possible on Windows 1.x, 2.x, and some Windows 3.0 systems.)
+
+If **Auto** is enabled, the file is saved immediately after opening.
+
+---
+
+## Menu Visibility (Unified Behavior)
+
+Menu visibility is controlled by the application itself and does **not** follow  
+the native UI behavior of Windows 1.x / 2.x / 3.x.
+
+- The menu is **always hidden** when the dialog is created.
+- Pressing **Alt** temporarily displays the menu.
+- When the menu is closed, it is hidden again automatically.
+
+This behavior is applied uniformly across all Win16 environments,  
+including Windows 1.x and 2.x.
+
+---
+
+## Language Menu (English / Japanese)
+
+When the menu is shown (via Alt), the following structure is available:
+
+File  
+- Open  
+- Exit  
+
+Language  
+- English  
+- Japanese  
+
+Selecting **Japanese** enables partial Japanese localization:  
+- Some UI labels become Japanese  
+- Error messages are displayed in Japanese  
+
+Selecting **English** restores the default English interface.
+
+---
+
+## Win1.0 / Win2.0 Fallback UI (Not Implemented)
+
+The source code contains a commented-out mechanism intended to switch between  
+Windows 1.x–style and Windows 2.x–style file dialogs depending on whether  
+a COMBOBOX control can be created.
+
+This mechanism is currently **not implemented**, because the application  
+only handles `*.mml` files and does not require a file list UI.
+
+As a result, the custom file dialog always uses a simple single-file input  
+without attempting UI fallback.
+
+---
+
+## Main Dialog Layout
+
+- File name display  
+- Transpose amount (horizontal scrollbar / spin / edit)  
 - Quick / Save / Auto  
 - FMT / Rel / Abs / D-ch  
 
-Win3.x 版とほぼ同じ構成です。
-
 ---
 
-## Auto Save（自動保存）
+## Auto Save (Automatic Saving)
 
-Win16 版は **8.3 形式のファイル名**で保存されます。
+Win16 saves files using **8.3-style filenames**.
 
-### ● 自動生成されるファイル名
+### Automatically generated filename
 
 ```
 of_<sign><shift><mode>[d].mml
 ```
 
-- `<sign>` … p（+） / m（-） / 0（0）  
-- `<shift>` … 00〜12  
-- `<mode>` … 0〜7（FMT / Rel / Abs の組み合わせ）  
-- `[d]` … D-ch ON のときだけ付く
+- `<sign>` … p (+) / m (-) / 0 (0)  
+- `<shift>` … 00–12  
+- `<mode>` … 0–7 (FMT / Rel / Abs combinations)  
+- `[d]` … appended only when D-ch is enabled
 
 ---
 
 ## Quick / Save
 
 - **Quick**  
-  → 自動命名規則に従って即保存  
+  → Immediately saves using the automatic naming rule.
+
 - **Save**  
-  → 名前を付けて保存ダイアログを開く  
-- **Auto OFF のときのみ有効**
+  → Opens the “Save As” dialog.
+
+Both buttons are available only when Auto is OFF.
 
 ---
 
-## 備考
+## Notes
 
-- 保存ファイル名の仕様は Win3.x 版（mmltrw30）と同じです  
-- 変換ロジックは CUI 版（mmltrd16）と同一です  
-- UI の構成は `mmltrw16.rc` を参照してください
+- The transposition logic is identical to the CUI version (mmltrd16).  
+- UI structure is defined in `mmltrw16.rc`.  
+- This application was developed with assistance from Copilot.  
+  Unexpected issues may occur.
 
-本アプリケーションは Copilot を活用して作成しています。  
-予期せぬ不具合はご容赦ください。
